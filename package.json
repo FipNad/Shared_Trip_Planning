@@ -1,0 +1,11 @@
+{
+  "name": "shared_trip_planning",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "check": "node --check site/app.js && node --check worker/src/index.js && node --test tests/*.test.mjs"
+  },
+  "devDependencies": {
+    "wrangler": "^4.147.0"
+  }
+}

@@ -1,0 +1,6 @@
+worker/wrangler.toml
+worker/.dev.vars
+.wrangler/
+.DS_Store
+node_modules/
+Dev_Plan/

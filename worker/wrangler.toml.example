@@ -1,0 +1,14 @@
+name = "northbound-api"
+main = "src/index.js"
+compatibility_date = "2026-10-03"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "northbound-trip"
+database_id = "REPLACE_WITH_D1_DATABASE_ID"
+
+[vars]
+# Comma-separated site origins, without trailing slash.
+ALLOWED_ORIGIN = "https://YOUR_GITHUB_USERNAME.github.io"
+# Optional: change to another OpenAI model with Structured Outputs support.
+OPENAI_MODEL = "gpt-4.1-mini"

@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#101c2c">
+  <meta name="description" content="Plan a shared road trip from Bucharest to Finnish Lapland.">
+  <title>Northbound · Lapland road trip planner</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Space+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="./vendor/leaflet/leaflet.css">
+  <link rel="stylesheet" href="./style.css">
+  <script src="./vendor/leaflet/leaflet.js" defer></script>
+  <script src="./app.js" defer></script>
+</head>
+<body>
+  <div class="app-shell">
+    <header class="topbar">
+      <div class="brand"><span class="brand-mark">N</span><div><strong>Northbound</strong><small>Bucharest ↔ Lapland</small></div></div>
+      <div class="top-actions"><span id="sync-status" class="sync-pill">Local draft</span><button id="share-button" class="button subtle" type="button">Share & sync</button></div>
+    </header>
+
+    <main>
+      <section class="intro">
+        <div class="intro-copy">
+          <p class="eyebrow">THE GROUP ROAD TRIP</p>
+          <h1>From Bucharest<br>to the <em>far north.</em></h1>
+          <p>Build the drive together. Choose where to sleep, compare both legs, and collect the places worth stopping for.</p>
+          <div class="trip-controls">
+            <label>Destination <select id="destination"><option value="oulu">Oulu, Finland</option><option value="levi">Levi, Finland</option></select></label>
+            <label>Your name <input id="display-name" maxlength="40" placeholder="e.g. Alex" autocomplete="nickname"></label>
+          </div>
+        </div>
+        <div class="intro-image" role="img" aria-label="Snowy road beneath the northern lights"><div class="image-caption"><span>48° N</span><span>→</span><span>67° N</span></div></div>
+      </section>
+
+      <section class="summary-grid" aria-label="Trip distance summary">
+        <div class="summary-card"><span class="summary-icon out">↗</span><div><small>OUTBOUND</small><strong id="out-distance">—</strong><span id="out-route-label">Bucharest → Oulu</span></div></div>
+        <div class="summary-card"><span class="summary-icon back">↙</span><div><small>RETURN</small><strong id="back-distance">—</strong><span id="back-route-label">Oulu → Bucharest</span></div></div>
+        <div class="summary-card total"><span class="summary-icon total-icon">∑</span><div><small>ROUND TRIP</small><strong id="total-distance">—</strong><span>Road distance on selected routes</span></div></div>
+      </section>
+
+      <section class="workspace">
+        <div class="section-heading"><div><p class="eyebrow">01 / THE ROUTE</p><h2>Shape the journey</h2></div><div class="view-tabs" role="tablist" aria-label="Map view"><button class="active" data-view="parallel" role="tab" aria-selected="true">Side by side</button><button data-view="combined" role="tab" aria-selected="false">Combined map</button></div></div>
+        <p id="route-notice" class="notice" role="status">Distances are calculated from road routes. Ferry crossings and live road conditions need checking before travel.</p>
+        <div id="parallel-maps" class="parallel-maps">
+          <article class="route-panel"><div class="panel-head"><div><span class="route-dot outbound"></span><h3>Outbound</h3></div><strong id="out-panel-distance">—</strong></div><div id="out-map" class="map" aria-label="Outbound route map"></div><div class="stops-head"><h4>Stops & overnight stays</h4><span>Bucharest → Lapland</span></div><div id="out-stops" class="stop-list"></div><form class="add-stop" data-leg="out"><label class="sr-only" for="out-search">Search for a stop</label><input id="out-search" name="query" placeholder="Search for a city or place" required minlength="2"><button type="submit">Find stop</button></form><div id="out-results" class="search-results"></div></article>
+          <article class="route-panel"><div class="panel-head"><div><span class="route-dot return"></span><h3>Return</h3></div><strong id="back-panel-distance">—</strong></div><div id="back-map" class="map" aria-label="Return route map"></div><div class="stops-head"><h4>Stops & overnight stays</h4><span>Lapland → Bucharest</span></div><div id="back-stops" class="stop-list"></div><form class="add-stop" data-leg="back"><label class="sr-only" for="back-search">Search for a stop</label><input id="back-search" name="query" placeholder="Search for a city or place" required minlength="2"><button type="submit">Find stop</button></form><div id="back-results" class="search-results"></div></article>
+        </div>
+        <div id="combined-panel" class="combined-panel hidden"><div class="combined-legend"><span><i class="route-dot outbound"></i> Outbound <b id="out-combined-distance">—</b></span><span><i class="route-dot return"></i> Return <b id="back-combined-distance">—</b></span><strong id="combined-total">— total</strong></div><div id="combined-map" class="map combined-map" aria-label="Combined outbound and return route map"></div></div>
+      </section>
+
+      <section class="ideas-section"><div class="section-heading"><div><p class="eyebrow">02 / THE DETOURS</p><h2>Places worth the stop</h2><p class="section-help">Ideas are suggestions, not reservations. Check opening hours, tickets and border rules before you go.</p></div><button id="suggest-button" class="button primary" type="button">Suggest with AI</button></div><div class="ideas-toolbar"><div class="view-tabs" role="group" aria-label="Filter ideas"><button class="active" data-filter="all">All ideas</button><button data-filter="out">Outbound</button><button data-filter="back">Return</button></div><button id="add-idea-button" class="button subtle" type="button">+ Propose an idea</button></div><div id="ideas-list" class="ideas-list"></div></section>
+      <footer>Made for the road ahead · Map data © OpenStreetMap contributors · Routing by <a href="https://openrouteservice.org/" target="_blank" rel="noopener noreferrer">openrouteservice</a> or <a href="https://project-osrm.org/" target="_blank" rel="noopener noreferrer">OSRM</a> · Routes are planning estimates.</footer>
+    </main>
+  </div>
+
+  <dialog id="share-dialog"><form method="dialog" class="dialog-card"><button class="dialog-close" type="button" aria-label="Close">×</button><p class="eyebrow">COLLABORATE</p><h2>Share one plan</h2><p>For live collaboration, deploy the included Worker and enter its URL and your shared trip passphrase. Give the same passphrase to your friends; no accounts are needed.</p><label>Worker URL <input id="worker-url" type="url" placeholder="https://northbound-api.you.workers.dev"></label><label>Trip passphrase <input id="trip-key" type="password" placeholder="Shared with your group"></label><div class="dialog-actions"><button id="disconnect-button" class="button subtle" type="button">Use local draft</button><button id="connect-button" class="button primary" type="button">Connect</button></div><p id="share-error" class="form-error"></p></form></dialog>
+  <dialog id="stop-dialog"><form method="dialog" class="dialog-card"><button class="dialog-close" type="button" aria-label="Close">×</button><p class="eyebrow">STOP DETAILS</p><h2 id="stop-dialog-title">Edit stop</h2><label>Nights to stay <input id="stop-nights" type="number" min="0" max="30" value="0"></label><label>Notes <textarea id="stop-note" rows="4" maxlength="500" placeholder="Hotel ideas, things to check, or why we should stop"></textarea></label><div class="dialog-actions"><button class="button subtle" type="button" data-close="stop-dialog">Cancel</button><button id="save-stop" class="button primary" type="button">Save stop</button></div></form></dialog>
+  <dialog id="idea-dialog"><form method="dialog" class="dialog-card"><button class="dialog-close" type="button" aria-label="Close">×</button><p class="eyebrow">GROUP IDEA</p><h2 id="idea-dialog-title">Propose an activity</h2><label>Route <select id="idea-leg"><option value="out">Outbound</option><option value="back">Return</option></select></label><label>Near stop <select id="idea-stop"></select></label><label>Place or activity <input id="idea-title" maxlength="100" required></label><label>Type <select id="idea-type"><option value="sightseeing">Sightseeing</option><option value="museum">Museum / history</option><option value="nature">Nature</option><option value="food">Food</option><option value="other">Other</option></select></label><label>Decision <select id="idea-status"><option value="suggested">Suggested</option><option value="planned">Planned</option></select></label><label>Why go? <textarea id="idea-description" rows="3" maxlength="500"></textarea></label><label>Source or official link <input id="idea-url" type="url" placeholder="https://..."></label><div class="dialog-actions"><button id="delete-idea" class="button danger" type="button">Delete</button><button id="save-idea" class="button primary" type="button">Save idea</button></div><p id="idea-error" class="form-error"></p></form></dialog>
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+</body>
+</html>
