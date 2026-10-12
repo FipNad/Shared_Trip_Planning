@@ -1,5 +1,5 @@
 const ORIGIN = { name: 'Bucharest', lat: 44.4268, lon: 26.1025 };
-const DESTINATIONS = { oulu:{name:'Oulu',lat:65.0121,lon:25.4651}, levi:{name:'Levi',lat:67.8051,lon:24.8028} };
+const DESTINATIONS = { oulu:{name:'Oulu',lat:65.0121,lon:25.4651}, levi:{name:'Levi',lat:67.8051,lon:24.8028}, rovaniemi:{name:'Rovaniemi', lat:66.4990, lon:25.6887}};
 const categories = new Set(['sightseeing','museum','nature','food','other']);
 const encode = new TextEncoder();
 
@@ -37,17 +37,54 @@ async function verifyKey(request,env) {
   if(difference!==0) fail('Incorrect trip passphrase',401);
 }
 async function state(db) {
-  const [config,stops,activities]=await Promise.all([
-    db.prepare('SELECT destination FROM trip_config WHERE id=1').first(),
+  const [config,stops,activities,accommodations]=await Promise.all([
+    db.prepare('SELECT destination,destination_nights FROM trip_config WHERE id=1').first(),
     db.prepare('SELECT * FROM stops ORDER BY leg, position, created_at').all(),
-    db.prepare('SELECT * FROM activities ORDER BY created_at DESC').all()
+    db.prepare('SELECT * FROM activities ORDER BY created_at DESC').all(),
+    db.prepare('SELECT * FROM accommodations ORDER BY created_at DESC').all()
   ]);
-  return {config:config||{destination:'oulu'},stops:stops.results,activities:activities.results};
+  return {config:config||{destination:'oulu',destination_nights:3},stops:stops.results,activities:activities.results,
+    accommodations:accommodations.results.map(a=>({...a,image_urls:JSON.parse(a.image_urls||'[]')}))};
 }
 async function existsStop(db,stopId,leg) {
   if(!stopId) return;
   const found=await db.prepare('SELECT id FROM stops WHERE id=? AND leg=?').bind(stopId,leg).first();
   if(!found) fail('Selected stop does not exist on this route');
+}
+function validAccommodation(body) {
+  const leg=body.leg;
+  if(!['out','back','destination'].includes(leg)) fail('Choose an overnight location');
+  const stop_id=leg==='destination'?null:bounded(body.stop_id,80);
+  if(leg!=='destination'&&!stop_id) fail('Choose a stop for this night');
+  const night_number=Number(body.night_number);
+  if(!Number.isInteger(night_number)||night_number<1||night_number>30) fail('Choose a valid night');
+  const name=bounded(body.name,120);
+  if(!name) fail('Accommodation name is required');
+  const price_amount=Number(body.price_amount);
+  if(body.price_amount==null||body.price_amount===''||!Number.isFinite(price_amount)||price_amount<0||price_amount>1000000) fail('Enter a valid nightly price');
+  const currency=bounded(body.currency,3).toUpperCase();
+  if(!/^[A-Z]{3}$/.test(currency)) fail('Use a three-letter currency code');
+  const rating_scale=body.rating_scale===undefined?10:Number(body.rating_scale);
+  if(![5,10].includes(rating_scale)) fail('Choose a 5 or 10 point review scale');
+  const rating=body.rating===''||body.rating==null?null:Number(body.rating);
+  if(rating!==null&&(!Number.isFinite(rating)||rating<0||rating>rating_scale)) fail(`Rating must be between 0 and ${rating_scale}`);
+  const review_count=body.review_count===''||body.review_count==null?null:Number(body.review_count);
+  if(review_count!==null&&(!Number.isInteger(review_count)||review_count<0||review_count>10000000)) fail('Enter a valid review count');
+  if(!Array.isArray(body.image_urls)||body.image_urls.length>3) fail('Add up to three image URLs');
+  const image_urls=body.image_urls.map(validUrl).filter(Boolean);
+  const booking_url=validUrl(body.booking_url);
+  if(!booking_url) fail('Add a link to the accommodation listing');
+  return {leg,stop_id,destination_code:null,night_number,name,price_amount,currency,rating,rating_scale,review_count,review_source:bounded(body.review_source,60),review_note:bounded(body.review_note,500),booking_url,image_urls,proposed_by:bounded(body.proposed_by,40)||'Friend'};
+}
+async function verifyNight(db,accommodation) {
+  if(accommodation.leg==='destination') {
+    const config=await db.prepare('SELECT destination,destination_nights FROM trip_config WHERE id=1').first();
+    if(accommodation.night_number>config.destination_nights) fail('This destination night no longer exists');
+    accommodation.destination_code=config.destination;
+  } else {
+    const stop=await db.prepare('SELECT nights FROM stops WHERE id=? AND leg=?').bind(accommodation.stop_id,accommodation.leg).first();
+    if(!stop||accommodation.night_number>stop.nights) fail('This stop night no longer exists');
+  }
 }
 async function route(request,env) {
   const body=await parseBody(request), coordinates=body.coordinates;
@@ -57,7 +94,7 @@ async function route(request,env) {
     return [validCoordinate(pair[0],-180,180),validCoordinate(pair[1],-90,90)];
   });
   const provider=env.ORS_API_KEY?'ors':'osrm';
-  const cacheKey=JSON.stringify([provider,points]);
+  const cacheKey=JSON.stringify(['segments-v2',provider,points]);
   const cached=await env.DB.prepare('SELECT data FROM route_cache WHERE cache_key=? AND created_at > datetime(\'now\',\'-7 days\')').bind(cacheKey).first();
   if(cached) return JSON.parse(cached.data);
   let result;
@@ -65,13 +102,13 @@ async function route(request,env) {
     const response=await fetch('https://api.heigit.org/openrouteservice/v2/directions/driving-car/geojson',{method:'POST',headers:{'Authorization':env.ORS_API_KEY,'Content-Type':'application/json'},body:JSON.stringify({coordinates:points})});
     const data=await response.json().catch(()=>({}));
     if(!response.ok||!data.features?.[0]) fail(`Routing service error: ${data.error?.message||response.status}`,502);
-    result={distance_m:data.features[0].properties.summary.distance,geometry:data.features[0].geometry,provider:'openrouteservice'};
+    result={distance_m:data.features[0].properties.summary.distance,segments_m:data.features[0].properties.segments?.map(s=>s.distance),geometry:data.features[0].geometry,provider:'openrouteservice'};
   } else {
     const coords=points.map(p=>p.join(',')).join(';');
     const response=await fetch(`https://router.project-osrm.org/route/v1/driving/${coords}?overview=full&geometries=geojson&steps=false`);
     const data=await response.json().catch(()=>({}));
     if(!response.ok||data.code!=='Ok'||!data.routes?.[0]) fail(`Routing service error: ${data.message||response.status}`,502);
-    result={distance_m:data.routes[0].distance,geometry:data.routes[0].geometry,provider:'OSRM demo'};
+    result={distance_m:data.routes[0].distance,segments_m:data.routes[0].legs?.map(s=>s.distance),geometry:data.routes[0].geometry,provider:'OSRM demo'};
   }
   await env.DB.prepare('INSERT OR REPLACE INTO route_cache(cache_key,data,created_at) VALUES(?,?,CURRENT_TIMESTAMP)').bind(cacheKey,JSON.stringify(result)).run();
   return result;
@@ -130,10 +167,15 @@ async function handle(request,env) {
   if(path==='/api/route'&&method==='POST') return route(request,env);
   if(path==='/api/suggestions'&&method==='POST') return suggest(request,env);
   if(path==='/api/config'&&method==='PUT') {
-    const {destination}=await parseBody(request);
-    if(!DESTINATIONS[destination]) fail('Choose Oulu or Levi');
-    await db.prepare('UPDATE trip_config SET destination=? WHERE id=1').bind(destination).run();
-    return {destination};
+    const {destination,destination_nights}=await parseBody(request);
+    if(!DESTINATIONS[destination]) fail('Choose Oulu or Levi or Rovaniemi');
+    const current=await db.prepare('SELECT destination,destination_nights FROM trip_config WHERE id=1').first();
+    const nights=destination_nights===undefined?current.destination_nights:Number(destination_nights);
+    if(!Number.isInteger(nights)||nights<0||nights>30) fail('Destination nights must be between 0 and 30');
+    const updates=[db.prepare('UPDATE trip_config SET destination=?,destination_nights=? WHERE id=1').bind(destination,nights)];
+    if(destination===current.destination&&nights<current.destination_nights) updates.push(db.prepare('DELETE FROM accommodations WHERE leg=? AND destination_code=? AND night_number>?').bind('destination',destination,nights));
+    await db.batch(updates);
+    return {destination,destination_nights:nights};
   }
   if(path==='/api/stops'&&method==='POST') {
     const body=await parseBody(request), leg=validLeg(body.leg), name=bounded(body.name,120);
@@ -157,8 +199,24 @@ async function handle(request,env) {
   if(stopMatch) {
     const stopId=stopMatch[1],found=await db.prepare('SELECT id FROM stops WHERE id=?').bind(stopId).first();
     if(!found) fail('Stop not found',404);
-    if(method==='PATCH') { const b=await parseBody(request), nights=Math.max(0,Math.min(30,Number(b.nights)||0)), note=bounded(b.note,500);await db.prepare('UPDATE stops SET nights=?,note=?,updated_at=CURRENT_TIMESTAMP WHERE id=?').bind(nights,note,stopId).run();return {ok:true}; }
-    if(method==='DELETE') { await db.batch([db.prepare('UPDATE activities SET stop_id=NULL WHERE stop_id=?').bind(stopId),db.prepare('DELETE FROM stops WHERE id=?').bind(stopId)]);return {ok:true}; }
+    if(method==='PATCH') { const b=await parseBody(request), nights=Math.max(0,Math.min(30,Number(b.nights)||0)), note=bounded(b.note,500);await db.batch([db.prepare('UPDATE stops SET nights=?,note=?,updated_at=CURRENT_TIMESTAMP WHERE id=?').bind(nights,note,stopId),db.prepare('DELETE FROM accommodations WHERE stop_id=? AND night_number>?').bind(stopId,nights)]);return {ok:true}; }
+    if(method==='DELETE') { await db.batch([db.prepare('UPDATE activities SET stop_id=NULL WHERE stop_id=?').bind(stopId),db.prepare('DELETE FROM accommodations WHERE stop_id=?').bind(stopId),db.prepare('DELETE FROM stops WHERE id=?').bind(stopId)]);return {ok:true}; }
+  }
+  if(path==='/api/accommodations'&&method==='POST') {
+    const a=validAccommodation(await parseBody(request));await verifyNight(db,a);a.id=id();
+    await db.prepare('INSERT INTO accommodations(id,leg,stop_id,destination_code,night_number,name,price_amount,currency,rating,rating_scale,review_count,review_source,review_note,booking_url,image_urls,proposed_by) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)').bind(a.id,a.leg,a.stop_id,a.destination_code,a.night_number,a.name,a.price_amount,a.currency,a.rating,a.rating_scale,a.review_count,a.review_source,a.review_note,a.booking_url,JSON.stringify(a.image_urls),a.proposed_by).run();
+    return a;
+  }
+  const accommodationMatch=path.match(/^\/api\/accommodations\/([a-zA-Z0-9-]+)$/);
+  if(accommodationMatch) {
+    const accommodationId=accommodationMatch[1],found=await db.prepare('SELECT id FROM accommodations WHERE id=?').bind(accommodationId).first();
+    if(!found) fail('Accommodation option not found',404);
+    if(method==='PATCH') {
+      const a=validAccommodation(await parseBody(request));await verifyNight(db,a);
+      await db.prepare('UPDATE accommodations SET leg=?,stop_id=?,destination_code=?,night_number=?,name=?,price_amount=?,currency=?,rating=?,rating_scale=?,review_count=?,review_source=?,review_note=?,booking_url=?,image_urls=?,proposed_by=?,updated_at=CURRENT_TIMESTAMP WHERE id=?').bind(a.leg,a.stop_id,a.destination_code,a.night_number,a.name,a.price_amount,a.currency,a.rating,a.rating_scale,a.review_count,a.review_source,a.review_note,a.booking_url,JSON.stringify(a.image_urls),a.proposed_by,accommodationId).run();
+      return {ok:true};
+    }
+    if(method==='DELETE') {await db.prepare('DELETE FROM accommodations WHERE id=?').bind(accommodationId).run();return {ok:true};}
   }
   if(path==='/api/activities'&&method==='POST') {
     const a=validActivity(await parseBody(request));await existsStop(db,a.stop_id,a.leg);a.id=id();

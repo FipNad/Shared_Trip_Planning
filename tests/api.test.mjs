@@ -7,6 +7,7 @@ import worker from '../worker/src/index.js';
 function setup() {
   const sqlite=new DatabaseSync(':memory:');
   sqlite.exec(readFileSync(new URL('../worker/migrations/0001_initial.sql',import.meta.url),'utf8'));
+  sqlite.exec(readFileSync(new URL('../worker/migrations/0002_accommodation.sql',import.meta.url),'utf8'));
   const db={
     prepare(sql) {
       const statement=values=>({
@@ -59,11 +60,12 @@ test('route returns road geometry and caches the provider result',async()=>{
   const env=setup();
   let fetches=0;
   const original=globalThis.fetch;
-  globalThis.fetch=async()=>{ fetches++; return new Response(JSON.stringify({code:'Ok',routes:[{distance:123456,geometry:{type:'LineString',coordinates:[[26.1,44.4],[19.04,47.5]]}}]}),{status:200}); };
+  globalThis.fetch=async()=>{ fetches++; return new Response(JSON.stringify({code:'Ok',routes:[{distance:123456,legs:[{distance:123456}],geometry:{type:'LineString',coordinates:[[26.1,44.4],[19.04,47.5]]}}]}),{status:200}); };
   try {
     const body={coordinates:[[26.1,44.4],[19.04,47.5]]};
     const first=await call(env,'/route','POST',body), second=await call(env,'/route','POST',body);
     assert.equal(first.body.distance_m,123456);
+    assert.deepEqual(first.body.segments_m,[123456]);
     assert.deepEqual(first.body.geometry.coordinates,second.body.geometry.coordinates);
     assert.equal(fetches,1);
   } finally { globalThis.fetch=original; }
@@ -75,13 +77,56 @@ test('ORS routing uses the current HeiGIT endpoint when a key is configured',asy
   globalThis.fetch=async(url,options)=>{
     assert.equal(url,'https://api.heigit.org/openrouteservice/v2/directions/driving-car/geojson');
     assert.equal(options.headers.Authorization,'test-route-key');
-    return new Response(JSON.stringify({features:[{properties:{summary:{distance:234567}},geometry:{type:'LineString',coordinates:[[26.1,44.4],[19.04,47.5]]}}]}),{status:200});
+    return new Response(JSON.stringify({features:[{properties:{summary:{distance:234567},segments:[{distance:234567}]},geometry:{type:'LineString',coordinates:[[26.1,44.4],[19.04,47.5]]}}]}),{status:200});
   };
   try {
     const response=await call(env,'/route','POST',{coordinates:[[26.1,44.4],[19.04,47.5]]});
     assert.equal(response.status,200);
     assert.equal(response.body.distance_m,234567);
+    assert.deepEqual(response.body.segments_m,[234567]);
   } finally { globalThis.fetch=original; }
+});
+
+test('friends can compare accommodations by night and removed nights clear their options',async()=>{
+  const env=setup();
+  const option={leg:'out',stop_id:'out-krakow',night_number:2,name:'Old Town Apartment',price_amount:125.5,currency:'EUR',rating:8.7,rating_scale:10,review_count:240,review_source:'Booking.com',review_note:'Walkable to the centre',booking_url:'https://example.com/stay',image_urls:['https://example.com/one.jpg','https://example.com/two.jpg'],proposed_by:'Alex'};
+  const created=await call(env,'/accommodations','POST',option);
+  assert.equal(created.status,200);
+  const invalid=await call(env,'/accommodations','POST',{...option,night_number:3});
+  assert.equal(invalid.status,400);
+  const unsafeImage=await call(env,'/accommodations','POST',{...option,image_urls:['javascript:alert(1)']});
+  assert.equal(unsafeImage.status,400);
+  const noListing=await call(env,'/accommodations','POST',{...option,booking_url:''});
+  assert.equal(noListing.status,400);
+  const wrongScale=await call(env,'/accommodations','POST',{...option,rating_scale:5});
+  assert.equal(wrongScale.status,400);
+  const wrongRoute=await call(env,'/accommodations','POST',{...option,leg:'back'});
+  assert.equal(wrongRoute.status,400);
+  const state=await call(env,'/state');
+  assert.deepEqual(state.body.accommodations[0].image_urls,option.image_urls);
+  assert.equal(state.body.accommodations[0].rating,8.7);
+  assert.equal(state.body.accommodations[0].review_source,'Booking.com');
+  const changed=await call(env,`/accommodations/${created.body.id}`,'PATCH',{...option,price_amount:115});
+  assert.equal(changed.status,200);
+  const afterEdit=await call(env,'/state');
+  assert.equal(afterEdit.body.accommodations[0].price_amount,115);
+  const shortened=await call(env,'/stops/out-krakow','PATCH',{nights:1,note:''});
+  assert.equal(shortened.status,200);
+  const afterShortening=await call(env,'/state');
+  assert.equal(afterShortening.body.accommodations.length,0);
+
+  const destination=await call(env,'/accommodations','POST',{...option,leg:'destination',stop_id:null,night_number:3,name:'Lapland Lodge'});
+  assert.equal(destination.status,200);
+  const config=await call(env,'/config','PUT',{destination:'oulu',destination_nights:2});
+  assert.equal(config.status,200);
+  const afterDestination=await call(env,'/state');
+  assert.equal(afterDestination.body.config.destination_nights,2);
+  assert.equal(afterDestination.body.accommodations.length,0);
+  const oulu=await call(env,'/accommodations','POST',{...option,leg:'destination',stop_id:null,night_number:1,name:'Oulu Hotel'});
+  assert.equal(oulu.status,200);
+  await call(env,'/config','PUT',{destination:'levi',destination_nights:2});
+  const afterSwitch=await call(env,'/state');
+  assert.equal(afterSwitch.body.accommodations[0].destination_code,'oulu');
 });
 
 test('AI suggestions use structured output and become editable activities',async()=>{
