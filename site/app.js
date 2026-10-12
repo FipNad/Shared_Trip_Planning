@@ -2,11 +2,11 @@
 const ORIGIN = { name: 'Bucharest', lat: 44.4268, lon: 26.1025 };
 const DESTINATIONS = {
   oulu: { name: 'Oulu', lat: 65.0121, lon: 25.4651 },
-  levi: { name: 'Levi', lat: 67.8051, lon: 24.8028 }, 
-  rovaniemi: {name: 'Rovaniemi', lat:67.8051, lon:24.8028}
+  levi: { name: 'Levi', lat: 67.8051, lon: 24.8028 },
+  rovaniemi: { name: 'Rovaniemi', lat: 66.5039, lon: 25.7294 }
 };
 const seed = () => ({
-  config: { destination: 'oulu', destination_nights: 3 },
+  config: { destination: 'oulu', destination_nights: 3, start_date: '' },
   stops: [
     ['out','Budapest',47.4979,19.0402,1],['out','Kraków',50.0647,19.9450,2],
     ['out','Warsaw',52.2297,21.0122,1],['out','Riga',56.9496,24.1052,1],
@@ -50,11 +50,43 @@ function safeUrl(raw) { try { const u=new URL(raw); return ['https:','http:'].in
 function km(meters) { return Number.isFinite(meters) ? `${Math.round(meters/1000).toLocaleString()} km` : '—'; }
 function routeStops(leg) { return state.stops.filter(s=>s.leg===leg).sort((a,b)=>a.position-b.position); }
 function points(leg) { const dest=DESTINATIONS[state.config.destination]||DESTINATIONS.oulu; return leg==='out'?[ORIGIN,...routeStops('out'),dest]:[dest,...routeStops('back'),ORIGIN]; }
-function normalizeState(value) { value.config.destination_nights ??= 3; value.accommodations ??= []; return value; }
+function routingPlan(leg) {
+  const all=points(leg), unique=[all[0]], segmentIndex=[];
+  for(const place of all.slice(1)) {
+    const previous=unique.at(-1);
+    if(place.lat===previous.lat&&place.lon===previous.lon) segmentIndex.push(null);
+    else { segmentIndex.push(unique.length-1); unique.push(place); }
+  }
+  return {unique,segmentIndex};
+}
+function normalizeState(value) { value.config.destination_nights ??= 3; value.config.start_date ??= ''; value.accommodations ??= []; return value; }
+function parseCalendarDate(value) {
+  if(typeof value!=='string'||!/^[0-9]{4}-[0-9]{2}-[0-9]{2}$/.test(value)) return null;
+  const date=new Date(`${value}T00:00:00.000Z`);
+  return !Number.isNaN(date.getTime())&&date.toISOString().slice(0,10)===value?date:null;
+}
+const shortDate=new Intl.DateTimeFormat('en-GB',{day:'numeric',month:'short',year:'2-digit',timeZone:'UTC'});
+function tripSchedule() {
+  const start=parseCalendarDate(state.config.start_date);
+  if(!start) return null;
+  let elapsed=0;
+  const stamp=()=>{const date=new Date(start.getTime()+elapsed*86400000);return {iso:date.toISOString().slice(0,10),day:elapsed+1};};
+  const out=[stamp()];
+  for(const stop of routeStops('out')) { out.push(stamp()); elapsed+=Math.max(0,Math.trunc(Number(stop.nights)||0)); }
+  out.push(stamp());
+  elapsed+=Math.max(0,Math.trunc(Number(state.config.destination_nights)||0));
+  const back=[stamp()];
+  for(const stop of routeStops('back')) { back.push(stamp()); elapsed+=Math.max(0,Math.trunc(Number(stop.nights)||0)); }
+  back.push(stamp());
+  return {out,back};
+}
 function nightSlots() {
-  const slots=[];
-  for(const leg of ['out','back']) for(const stop of routeStops(leg)) for(let n=1;n<=Number(stop.nights||0);n++) slots.push({leg,stop_id:stop.id,night_number:n,label:`${leg==='out'?'Outbound':'Return'} · ${stop.name} · Night ${n}`});
-  for(let n=1;n<=Number(state.config.destination_nights||0);n++) slots.push({leg:'destination',stop_id:null,destination_code:state.config.destination,night_number:n,label:`Lapland · ${DESTINATIONS[state.config.destination].name} · Night ${n}`});
+  const slots=[], schedule=tripSchedule();
+  const nightLabel=(entry,n)=>entry?` · ${shortDate.format(new Date(Date.parse(`${entry.iso}T00:00:00.000Z`)+(n-1)*86400000))}`:'';
+  for(const leg of ['out','back']) routeStops(leg).forEach((stop,i)=>{
+    for(let n=1;n<=Number(stop.nights||0);n++) slots.push({leg,stop_id:stop.id,night_number:n,label:`${leg==='out'?'Outbound':'Return'} · ${stop.name} · Night ${n}${nightLabel(schedule?.[leg]?.[i+1],n)}`});
+  });
+  for(let n=1;n<=Number(state.config.destination_nights||0);n++) slots.push({leg:'destination',stop_id:null,destination_code:state.config.destination,night_number:n,label:`Lapland · ${DESTINATIONS[state.config.destination].name} · Night ${n}${nightLabel(schedule?.out?.at(-1),n)}`});
   return slots;
 }
 function slotKey(slot) { return `${slot.leg}|${slot.stop_id||''}|${slot.destination_code||''}|${slot.night_number}`; }
@@ -84,6 +116,7 @@ async function change(path,method,body,localMutation) {
 function render() {
   const dest=DESTINATIONS[state.config.destination]||DESTINATIONS.oulu;
   $('#destination').value=state.config.destination;
+  $('#start-date').value=state.config.start_date;
   $('#destination-nights').value=state.config.destination_nights;
   $('#display-name').value=displayName;
   $('#out-route-label').textContent=`Bucharest → ${dest.name}`;
@@ -95,10 +128,17 @@ function renderStops(leg) {
   const list=$(`#${leg}-stops`);
   const start=leg==='out'?ORIGIN:dest, end=leg==='out'?dest:ORIGIN;
   const items=routeStops(leg);
+  const dates=tripSchedule()?.[leg];
   const segments=routeData[leg]?.segments_m;
   const legKm=i=>Array.isArray(segments)&&segments.length===items.length+1&&Number.isFinite(segments[i])?`<span class="stop-leg-distance">${km(segments[i])} from previous</span>`:'<span class="stop-leg-distance pending">— from previous</span>';
-  const endpoint=(place,label,segment)=>`<div class="stop-row endpoint"><span class="stop-index">●</span><div class="stop-main"><strong>${escapeHtml(place.name)}</strong><small>${label}</small></div>${segment===undefined?'':legKm(segment)}</div>`;
-  list.innerHTML=endpoint(start,'Start')+items.map((s,i)=>`<div class="stop-row"><span class="stop-index ${leg==='back'?'return':''}">${i+1}</span><div class="stop-main"><strong>${escapeHtml(s.name)}</strong><small>${s.nights?`${s.nights} night${s.nights===1?'':'s'}`:'Pass through'}${s.note?' · '+escapeHtml(s.note):''}</small></div>${legKm(i)}<div class="stop-actions"><button class="icon-button" data-action="up" data-id="${escapeHtml(s.id)}" data-leg="${leg}" aria-label="Move ${escapeHtml(s.name)} up" ${i===0?'disabled':''}>↑</button><button class="icon-button" data-action="down" data-id="${escapeHtml(s.id)}" data-leg="${leg}" aria-label="Move ${escapeHtml(s.name)} down" ${i===items.length-1?'disabled':''}>↓</button><button class="icon-button" data-action="edit-stop" data-id="${escapeHtml(s.id)}" aria-label="Edit ${escapeHtml(s.name)}">✎</button><button class="icon-button" data-action="remove-stop" data-id="${escapeHtml(s.id)}" aria-label="Remove ${escapeHtml(s.name)}">×</button></div></div>`).join('')+endpoint(end,'Finish',items.length);
+  const dateBadge=(index,phase)=>{
+    const entry=dates?.[index];
+    if(!entry) return `<span class="stop-date unset"><b>${phase==='start'?'START':phase==='end'?'END':'DAY'}</b><small>${phase==='start'?'Set date':'—'}</small></span>`;
+    const prefix=phase==='start'?'START · ':phase==='end'?'END · ':'';
+    return `<span class="stop-date"><b>${prefix}D${entry.day}</b><time datetime="${entry.iso}" title="${entry.iso}">${shortDate.format(new Date(`${entry.iso}T00:00:00.000Z`))}</time></span>`;
+  };
+  const endpoint=(place,label,index,segment)=>`<div class="stop-row endpoint">${dateBadge(index,label==='Start'?'start':'end')}<span class="stop-index">●</span><div class="stop-main"><strong>${escapeHtml(place.name)}</strong><small>${label}</small></div>${segment===undefined?'':legKm(segment)}</div>`;
+  list.innerHTML=endpoint(start,'Start',0)+items.map((s,i)=>`<div class="stop-row">${dateBadge(i+1,'current')}<span class="stop-index ${leg==='back'?'return':''}">${i+1}</span><div class="stop-main"><strong>${escapeHtml(s.name)}</strong><small>${s.nights?`${s.nights} night${s.nights===1?'':'s'}`:'Pass through'}${s.note?' · '+escapeHtml(s.note):''}</small></div>${legKm(i)}<div class="stop-actions"><button class="icon-button" data-action="up" data-id="${escapeHtml(s.id)}" data-leg="${leg}" aria-label="Move ${escapeHtml(s.name)} up" ${i===0?'disabled':''}>↑</button><button class="icon-button" data-action="down" data-id="${escapeHtml(s.id)}" data-leg="${leg}" aria-label="Move ${escapeHtml(s.name)} down" ${i===items.length-1?'disabled':''}>↓</button><button class="icon-button" data-action="edit-stop" data-id="${escapeHtml(s.id)}" aria-label="Edit ${escapeHtml(s.name)}">✎</button><button class="icon-button" data-action="remove-stop" data-id="${escapeHtml(s.id)}" aria-label="Remove ${escapeHtml(s.name)}">×</button></div></div>`).join('')+endpoint(end,'Finish',items.length+1,items.length);
 }
 function renderHousing() {
   const slots=nightSlots(), list=$('#housing-list');
@@ -165,17 +205,18 @@ function drawMap(key) {
   if(bounds.length) map.fitBounds(bounds,{padding:[25,25],maxZoom:6});
 }
 async function fetchRoadRoute(leg) {
-  const pts=points(leg), cacheKey=JSON.stringify([leg,pts.map(p=>[p.lon,p.lat]),isShared()?backend:'local']);
+  const {unique,segmentIndex}=routingPlan(leg), cacheKey=JSON.stringify([leg,unique.map(p=>[p.lon,p.lat]),segmentIndex,isShared()?backend:'local']);
   if(routeCache[cacheKey]) return routeCache[cacheKey];
   let result;
-  if(isShared()) result=await api('/route','POST',{coordinates:pts.map(p=>[p.lon,p.lat])});
+  if(isShared()) result=await api('/route','POST',{coordinates:unique.map(p=>[p.lon,p.lat])});
   else {
-    const coords=pts.map(p=>`${p.lon},${p.lat}`).join(';');
+    const coords=unique.map(p=>`${p.lon},${p.lat}`).join(';');
     const response=await fetch(`https://router.project-osrm.org/route/v1/driving/${coords}?overview=full&geometries=geojson&steps=false`);
     const data=await response.json();
     if(!response.ok||data.code!=='Ok'||!data.routes?.[0]) throw new Error(data.message||'Road route unavailable');
     result={distance_m:data.routes[0].distance,segments_m:data.routes[0].legs?.map(s=>s.distance),geometry:data.routes[0].geometry,provider:'OSRM demo'};
   }
+  result={...result,segments_m:segmentIndex.map(index=>index===null?0:result.segments_m?.[index])};
   routeCache[cacheKey]=result;
   return result;
 }
@@ -219,7 +260,7 @@ function openStop(id) {
 }
 async function saveStop() {
   if(!editingStop) return;
-  const id=editingStop.id, nights=Math.max(0,Math.min(30,Number($('#stop-nights').value)||0)), note=$('#stop-note').value.trim();
+  const id=editingStop.id, nights=Math.max(0,Math.min(30,Math.trunc(Number($('#stop-nights').value)||0))), note=$('#stop-note').value.trim();
   const removed=state.accommodations.filter(a=>a.stop_id===id&&a.night_number>nights);
   if(!confirmNightRemoval(removed)) return;
   await change(`/stops/${encodeURIComponent(id)}`,'PATCH',{nights,note},()=>{Object.assign(editingStop,{nights,note});state.accommodations=state.accommodations.filter(a=>!removed.includes(a));});
@@ -330,6 +371,12 @@ function bindEvents() {
     const destination=e.target.value;
     try { await change('/config','PUT',{destination,destination_nights:state.config.destination_nights},()=>{state.config.destination=destination;}); notify(`Destination set to ${DESTINATIONS[destination].name}`); }
     catch(err) { notify(err.message); render(); }
+  });
+  $('#start-date').addEventListener('change',async e=>{
+    const start_date=e.target.value;
+    if(start_date&&!parseCalendarDate(start_date)) { notify('Choose a valid departure date.'); render(); return; }
+    try { await change('/config','PUT',{destination:state.config.destination,start_date},()=>{state.config.start_date=start_date;});notify(start_date?'Departure date updated':'Departure date cleared'); }
+    catch(err) { notify(err.message);render(); }
   });
   $('#destination-nights').addEventListener('change',async e=>{
     const nights=Number(e.target.value);

@@ -2,12 +2,15 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 import { readFileSync } from 'node:fs';
+import { runInNewContext } from 'node:vm';
 import worker from '../worker/src/index.js';
 
 function setup() {
   const sqlite=new DatabaseSync(':memory:');
   sqlite.exec(readFileSync(new URL('../worker/migrations/0001_initial.sql',import.meta.url),'utf8'));
   sqlite.exec(readFileSync(new URL('../worker/migrations/0002_accommodation.sql',import.meta.url),'utf8'));
+  sqlite.exec(readFileSync(new URL('../worker/migrations/0003_flexible_destinations.sql',import.meta.url),'utf8'));
+  sqlite.exec(readFileSync(new URL('../worker/migrations/0004_trip_start_date.sql',import.meta.url),'utf8'));
   const db={
     prepare(sql) {
       const statement=values=>({
@@ -34,6 +37,7 @@ test('passphrase protects the shared trip and CORS allows the configured site',a
   assert.equal(ok.status,200);
   assert.equal(ok.cors,'https://example.github.io');
   assert.equal(ok.body.config.destination,'oulu');
+  assert.equal(ok.body.config.start_date,'');
   assert.ok(ok.body.stops.length>0);
 });
 
@@ -127,6 +131,62 @@ test('friends can compare accommodations by night and removed nights clear their
   await call(env,'/config','PUT',{destination:'levi',destination_nights:2});
   const afterSwitch=await call(env,'/state');
   assert.equal(afterSwitch.body.accommodations[0].destination_code,'oulu');
+  const changedDestination=await call(env,'/config','PUT',{destination:'rovaniemi',destination_nights:2});
+  assert.equal(changedDestination.status,200);
+  const rovaniemi=await call(env,'/accommodations','POST',{...option,leg:'destination',stop_id:null,night_number:1,name:'Rovaniemi Hotel'});
+  assert.equal(rovaniemi.status,200);
+  const afterRovaniemi=await call(env,'/state');
+  assert.equal(afterRovaniemi.body.accommodations.find(a=>a.name==='Rovaniemi Hotel').destination_code,'rovaniemi');
+});
+
+test('destination migration preserves earlier stays and accepts Rovaniemi',()=>{
+  const sqlite=new DatabaseSync(':memory:');
+  sqlite.exec('PRAGMA foreign_keys=ON');
+  sqlite.exec(readFileSync(new URL('../worker/migrations/0001_initial.sql',import.meta.url),'utf8'));
+  sqlite.exec(readFileSync(new URL('../worker/migrations/0002_accommodation.sql',import.meta.url),'utf8'));
+  sqlite.exec("INSERT INTO accommodations(id,leg,destination_code,night_number,name,price_amount) VALUES('existing','destination','oulu',1,'Existing stay',100)");
+  sqlite.exec(readFileSync(new URL('../worker/migrations/0003_flexible_destinations.sql',import.meta.url),'utf8'));
+  assert.equal(sqlite.prepare("SELECT name FROM accommodations WHERE id='existing'").get().name,'Existing stay');
+  sqlite.exec("INSERT INTO accommodations(id,leg,destination_code,night_number,name,price_amount) VALUES('new','destination','rovaniemi',1,'New stay',120)");
+  assert.equal(sqlite.prepare("SELECT name FROM accommodations WHERE id='new'").get().name,'New stay');
+});
+
+test('Rovaniemi starter return stop does not create a duplicate routing waypoint',()=>{
+  const source=readFileSync(new URL('../site/app.js',import.meta.url),'utf8');
+  const context={document:{addEventListener(){}},localStorage:{getItem(){return null;}},sessionStorage:{getItem(){return null;}}};
+  runInNewContext(`${source}\nstate.config.destination='rovaniemi';globalThis.routePlanTest=routingPlan('back');`,context);
+  const plan=context.routePlanTest;
+  assert.equal(plan.unique[0].name,'Rovaniemi');
+  assert.equal(plan.segmentIndex[0],null);
+  assert.equal(plan.unique.filter(p=>p.name==='Rovaniemi').length,1);
+});
+
+test('departure date is shared, validated, and preserved when changing destination',async()=>{
+  const env=setup();
+  const saved=await call(env,'/config','PUT',{destination:'oulu',start_date:'2028-02-28'});
+  assert.equal(saved.status,200);
+  assert.equal(saved.body.start_date,'2028-02-28');
+  const invalid=await call(env,'/config','PUT',{destination:'oulu',start_date:'2027-02-29'});
+  assert.equal(invalid.status,400);
+  const changed=await call(env,'/config','PUT',{destination:'levi'});
+  assert.equal(changed.status,200);
+  const refreshed=await call(env,'/state');
+  assert.equal(refreshed.body.config.start_date,'2028-02-28');
+});
+
+test('arrival schedule crosses leap day and carries days into the return route',()=>{
+  const source=readFileSync(new URL('../site/app.js',import.meta.url),'utf8');
+  const context={document:{addEventListener(){}},localStorage:{getItem(){return null;}},sessionStorage:{getItem(){return null;}}};
+  runInNewContext(`${source}\nstate.config.start_date='2028-02-28';globalThis.scheduleTest=tripSchedule();state.stops.find(s=>s.leg==='out'&&s.name==='Budapest').nights=0;globalThis.updatedSchedule=tripSchedule();`,context);
+  const schedule=context.scheduleTest;
+  assert.equal(schedule.out[0].iso,'2028-02-28');
+  assert.equal(schedule.out[2].iso,'2028-02-29');
+  assert.equal(schedule.out.at(-1).iso,'2028-03-06');
+  assert.equal(schedule.back[0].iso,'2028-03-09');
+  assert.equal(schedule.back.at(-1).iso,'2028-03-14');
+  assert.equal(schedule.back.at(-1).day,16);
+  assert.equal(context.updatedSchedule.out[2].iso,'2028-02-28');
+  assert.equal(context.updatedSchedule.back[0].iso,'2028-03-08');
 });
 
 test('AI suggestions use structured output and become editable activities',async()=>{

@@ -1,0 +1,1 @@
+ALTER TABLE trip_config ADD COLUMN start_date TEXT NOT NULL DEFAULT '';

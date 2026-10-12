@@ -1,5 +1,5 @@
 const ORIGIN = { name: 'Bucharest', lat: 44.4268, lon: 26.1025 };
-const DESTINATIONS = { oulu:{name:'Oulu',lat:65.0121,lon:25.4651}, levi:{name:'Levi',lat:67.8051,lon:24.8028}, rovaniemi:{name:'Rovaniemi', lat:66.4990, lon:25.6887}};
+const DESTINATIONS = { oulu:{name:'Oulu',lat:65.0121,lon:25.4651}, levi:{name:'Levi',lat:67.8051,lon:24.8028}, rovaniemi:{name:'Rovaniemi',lat:66.5039,lon:25.7294} };
 const categories = new Set(['sightseeing','museum','nature','food','other']);
 const encode = new TextEncoder();
 
@@ -20,6 +20,13 @@ function bounded(value,max=500) { return typeof value==='string'?value.trim().sl
 function id() { return crypto.randomUUID(); }
 function validLeg(v) { if(v!=='out'&&v!=='back') fail('Choose outbound or return'); return v; }
 function validCoordinate(v,min,max) { const n=Number(v); if(!Number.isFinite(n)||n<min||n>max) fail('Invalid coordinates'); return n; }
+function validTripDate(value) {
+  if(value==='') return '';
+  if(typeof value!=='string'||!/^[0-9]{4}-[0-9]{2}-[0-9]{2}$/.test(value)) fail('Enter a valid departure date');
+  const date=new Date(`${value}T00:00:00.000Z`);
+  if(Number.isNaN(date.getTime())||date.toISOString().slice(0,10)!==value) fail('Enter a valid departure date');
+  return value;
+}
 function validUrl(value) { const v=bounded(value,500); if(!v) return ''; try { const u=new URL(v); if(u.protocol==='http:'||u.protocol==='https:') return u.href; } catch {} fail('Invalid source URL'); }
 function validActivity(body) {
   const leg=validLeg(body.leg), title=bounded(body.title,100), category=bounded(body.category,30);
@@ -38,12 +45,12 @@ async function verifyKey(request,env) {
 }
 async function state(db) {
   const [config,stops,activities,accommodations]=await Promise.all([
-    db.prepare('SELECT destination,destination_nights FROM trip_config WHERE id=1').first(),
+    db.prepare('SELECT destination,destination_nights,start_date FROM trip_config WHERE id=1').first(),
     db.prepare('SELECT * FROM stops ORDER BY leg, position, created_at').all(),
     db.prepare('SELECT * FROM activities ORDER BY created_at DESC').all(),
     db.prepare('SELECT * FROM accommodations ORDER BY created_at DESC').all()
   ]);
-  return {config:config||{destination:'oulu',destination_nights:3},stops:stops.results,activities:activities.results,
+  return {config:config||{destination:'oulu',destination_nights:3,start_date:''},stops:stops.results,activities:activities.results,
     accommodations:accommodations.results.map(a=>({...a,image_urls:JSON.parse(a.image_urls||'[]')}))};
 }
 async function existsStop(db,stopId,leg) {
@@ -167,15 +174,16 @@ async function handle(request,env) {
   if(path==='/api/route'&&method==='POST') return route(request,env);
   if(path==='/api/suggestions'&&method==='POST') return suggest(request,env);
   if(path==='/api/config'&&method==='PUT') {
-    const {destination,destination_nights}=await parseBody(request);
-    if(!DESTINATIONS[destination]) fail('Choose Oulu or Levi or Rovaniemi');
-    const current=await db.prepare('SELECT destination,destination_nights FROM trip_config WHERE id=1').first();
+    const {destination,destination_nights,start_date}=await parseBody(request);
+    if(!DESTINATIONS[destination]) fail('Choose Oulu, Levi, or Rovaniemi');
+    const current=await db.prepare('SELECT destination,destination_nights,start_date FROM trip_config WHERE id=1').first();
     const nights=destination_nights===undefined?current.destination_nights:Number(destination_nights);
     if(!Number.isInteger(nights)||nights<0||nights>30) fail('Destination nights must be between 0 and 30');
-    const updates=[db.prepare('UPDATE trip_config SET destination=?,destination_nights=? WHERE id=1').bind(destination,nights)];
+    const departure=start_date===undefined?current.start_date:validTripDate(start_date);
+    const updates=[db.prepare('UPDATE trip_config SET destination=?,destination_nights=?,start_date=? WHERE id=1').bind(destination,nights,departure)];
     if(destination===current.destination&&nights<current.destination_nights) updates.push(db.prepare('DELETE FROM accommodations WHERE leg=? AND destination_code=? AND night_number>?').bind('destination',destination,nights));
     await db.batch(updates);
-    return {destination,destination_nights:nights};
+    return {destination,destination_nights:nights,start_date:departure};
   }
   if(path==='/api/stops'&&method==='POST') {
     const body=await parseBody(request), leg=validLeg(body.leg), name=bounded(body.name,120);
@@ -184,7 +192,7 @@ async function handle(request,env) {
     const count=await db.prepare('SELECT COUNT(*) AS n FROM stops WHERE leg=?').bind(leg).first();
     if(count.n>=16) fail('Maximum 16 stops per route');
     const order=await db.prepare('SELECT COALESCE(MAX(position),-1)+1 AS n FROM stops WHERE leg=?').bind(leg).first();
-    const stop={id:id(),leg,name,lat,lon,nights:Math.max(0,Math.min(30,Number(body.nights)||0)),note:bounded(body.note,500),position:order.n,created_by:bounded(body.created_by,40)||'Friend'};
+    const stop={id:id(),leg,name,lat,lon,nights:Math.max(0,Math.min(30,Math.trunc(Number(body.nights)||0))),note:bounded(body.note,500),position:order.n,created_by:bounded(body.created_by,40)||'Friend'};
     await db.prepare('INSERT INTO stops(id,leg,name,lat,lon,nights,note,position,created_by) VALUES(?,?,?,?,?,?,?,?,?)').bind(stop.id,stop.leg,stop.name,stop.lat,stop.lon,stop.nights,stop.note,stop.position,stop.created_by).run();
     return stop;
   }
@@ -199,7 +207,7 @@ async function handle(request,env) {
   if(stopMatch) {
     const stopId=stopMatch[1],found=await db.prepare('SELECT id FROM stops WHERE id=?').bind(stopId).first();
     if(!found) fail('Stop not found',404);
-    if(method==='PATCH') { const b=await parseBody(request), nights=Math.max(0,Math.min(30,Number(b.nights)||0)), note=bounded(b.note,500);await db.batch([db.prepare('UPDATE stops SET nights=?,note=?,updated_at=CURRENT_TIMESTAMP WHERE id=?').bind(nights,note,stopId),db.prepare('DELETE FROM accommodations WHERE stop_id=? AND night_number>?').bind(stopId,nights)]);return {ok:true}; }
+    if(method==='PATCH') { const b=await parseBody(request), nights=Math.max(0,Math.min(30,Math.trunc(Number(b.nights)||0))), note=bounded(b.note,500);await db.batch([db.prepare('UPDATE stops SET nights=?,note=?,updated_at=CURRENT_TIMESTAMP WHERE id=?').bind(nights,note,stopId),db.prepare('DELETE FROM accommodations WHERE stop_id=? AND night_number>?').bind(stopId,nights)]);return {ok:true}; }
     if(method==='DELETE') { await db.batch([db.prepare('UPDATE activities SET stop_id=NULL WHERE stop_id=?').bind(stopId),db.prepare('DELETE FROM accommodations WHERE stop_id=?').bind(stopId),db.prepare('DELETE FROM stops WHERE id=?').bind(stopId)]);return {ok:true}; }
   }
   if(path==='/api/accommodations'&&method==='POST') {
